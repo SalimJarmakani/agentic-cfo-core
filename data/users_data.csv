@@ -1,0 +1,6 @@
+user_id,current_age,retirement_age,birth_year,birth_month,gender,address,latitude,longitude,per_capita_income,yearly_income,total_debt,credit_score,num_credit_cards
+721,39,67,1980,5,Male,9735 Birch Street,25.77,-80.2,$18828,$38386,$74820,850,6
+1087,40,65,1979,12,Female,613 George Boulevard,37.53,-84.66,$15202,$30997,$81716,722,2
+1130,50,65,1970,1,Female,801 Mountain View Street,47.3,-122.31,$21756,$44355,$44779,680,3
+1105,77,60,1942,6,Male,766 Mountain View Drive,26.21,-98.31,$14275,$22104,$20031,670,3
+2,48,64,1971,8,Male,6035 Forest Avenue,40.84,-73.87,$13461,$27447,$80850,673,5
