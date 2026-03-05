@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-CaixaBank CSVs -> Neo4j migration script.
+CaixaBank files -> Neo4j migration script.
 
-Expected files in DATA_DIR (current project format):
-  - users_dim.csv
-  - cards_dim.csv
-  - categories_dim.csv
+Files expected in DATA_DIR:
+  - users_data.csv
+  - cards_data.csv
+  - transactions_data.csv
+  - mcc_codes.json (preferred) OR categories_dim.csv (fallback)
   - merchants_dim.csv
-  - transactions_fact.csv
   - fraud_labels.csv
 
 Environment variables:
@@ -21,9 +21,10 @@ Environment variables:
   BATCH_SIZE=5000
 """
 
+import json
 import os
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 import pandas as pd
 from neo4j import GraphDatabase
@@ -31,8 +32,8 @@ from neo4j import GraphDatabase
 
 NEO4J_URI = os.getenv("NEO4J_URI", "bolt://localhost:7687")
 NEO4J_USER = os.getenv("NEO4J_USER", "neo4j")
-NEO4J_PASSWORD = os.getenv("NEO4J_PASSWORD", "")
-NEO4J_DATABASE = os.getenv("NEO4J_DATABASE", "neo4j")
+NEO4J_PASSWORD = os.getenv("NEO4J_PASSWORD", "neo4j12345")
+NEO4J_DATABASE = os.getenv("NEO4J_DATABASE", "caixabank")
 
 DATA_DIR = Path(os.getenv("DATA_DIR", "./data")).resolve()
 SAMPLE_USERS = int(os.getenv("SAMPLE_USERS", "0")) or None
@@ -40,11 +41,12 @@ RANDOM_SEED = int(os.getenv("RANDOM_SEED", "42"))
 BATCH_SIZE = int(os.getenv("BATCH_SIZE", "5000"))
 
 FILES = {
-    "users": DATA_DIR / "users_dim.csv",
-    "cards": DATA_DIR / "cards_dim.csv",
-    "categories": DATA_DIR / "categories_dim.csv",
+    "users": DATA_DIR / "users_data.csv",
+    "cards": DATA_DIR / "cards_data.csv",
+    "tx": DATA_DIR / "transactions_data.csv",
+    "mcc": DATA_DIR / "mcc_codes.json",
+    "categories_csv": DATA_DIR / "categories_dim.csv",
     "merchants": DATA_DIR / "merchants_dim.csv",
-    "transactions": DATA_DIR / "transactions_fact.csv",
     "fraud": DATA_DIR / "fraud_labels.csv",
 }
 
@@ -64,31 +66,52 @@ def yesno_to_bool(series: pd.Series) -> pd.Series:
 
 
 def normalize_zip(series: pd.Series) -> pd.Series:
-    def clean(v: Any) -> Any:
+    def clean(v: Any) -> Optional[str]:
         if pd.isna(v):
             return None
         s = str(v).strip()
         if s.endswith(".0"):
             s = s[:-2]
-        return s if s else None
+        if not s or s.lower() == "nan":
+            return None
+        return s
 
     return series.map(clean)
 
 
 def ensure_files() -> None:
-    for key, path in FILES.items():
-        if not path.exists():
-            raise FileNotFoundError(f"Missing required file for {key}: {path}")
+    required = ["users", "cards", "tx", "merchants", "fraud"]
+    for key in required:
+        if not FILES[key].exists():
+            raise FileNotFoundError(f"Missing required file for {key}: {FILES[key]}")
+
+    if not FILES["mcc"].exists() and not FILES["categories_csv"].exists():
+        raise FileNotFoundError(
+            "Missing category source: expected mcc_codes.json or categories_dim.csv in DATA_DIR"
+        )
 
 
-def load_sources() -> Dict[str, pd.DataFrame]:
+def load_sources() -> Dict[str, Any]:
     ensure_files()
+
+    if FILES["mcc"].exists():
+        with open(FILES["mcc"], "r", encoding="utf-8") as f:
+            mcc = json.load(f)
+    else:
+        categories = pd.read_csv(FILES["categories_csv"])
+        if "mcc" not in categories.columns or "description" not in categories.columns:
+            raise ValueError("categories_dim.csv must contain 'mcc' and 'description' columns")
+        mcc = {
+            str(int(v["mcc"])): v["description"]
+            for _, v in categories.dropna(subset=["mcc", "description"]).iterrows()
+        }
+
     return {
         "users": pd.read_csv(FILES["users"]),
         "cards": pd.read_csv(FILES["cards"]),
-        "categories": pd.read_csv(FILES["categories"]),
+        "tx": pd.read_csv(FILES["tx"]),
+        "mcc": mcc,
         "merchants": pd.read_csv(FILES["merchants"]),
-        "transactions": pd.read_csv(FILES["transactions"]),
         "fraud": pd.read_csv(FILES["fraud"]),
     }
 
@@ -104,12 +127,11 @@ def sample_users_from_transactions(tx: pd.DataFrame, n: int) -> List[int]:
     )
 
 
-def build_tables(src: Dict[str, pd.DataFrame]) -> Dict[str, pd.DataFrame]:
+def build_tables(src: Dict[str, Any]) -> Dict[str, pd.DataFrame]:
     users_raw = src["users"].copy()
     cards_raw = src["cards"].copy()
-    categories_raw = src["categories"].copy()
+    tx_raw = src["tx"].copy()
     merchants_raw = src["merchants"].copy()
-    tx_raw = src["transactions"].copy()
     fraud_raw = src["fraud"].copy()
 
     if SAMPLE_USERS:
@@ -136,15 +158,14 @@ def build_tables(src: Dict[str, pd.DataFrame]) -> Dict[str, pd.DataFrame]:
     cards_df = cards_df.dropna(subset=["card_id", "user_id"]).drop_duplicates(subset=["card_id"])
     cards_df = cards_df.drop(columns=["client_id"], errors="ignore")
 
-    categories_df = categories_raw.copy()
-    categories_df["mcc"] = pd.to_numeric(categories_df["mcc"], errors="coerce").astype("Int64")
-    categories_df = categories_df.dropna(subset=["mcc"]).drop_duplicates(subset=["mcc"])
+    mcc_df = pd.DataFrame([{"mcc": int(k), "description": v} for k, v in src["mcc"].items()])
+    mcc_df["mcc"] = pd.to_numeric(mcc_df["mcc"], errors="coerce").astype("Int64")
+    mcc_df = mcc_df.dropna(subset=["mcc"]).drop_duplicates(subset=["mcc"])
 
-    merchants_df = merchants_raw.copy()
-    merchants_df["merchant_id"] = pd.to_numeric(merchants_df["merchant_id"], errors="coerce").astype("Int64")
-    merchants_df["mcc"] = pd.to_numeric(merchants_df["mcc"], errors="coerce").astype("Int64")
-    merchants_df["zip"] = normalize_zip(merchants_df["zip"])
-    merchants_df = merchants_df.dropna(subset=["merchant_id"]).drop_duplicates(subset=["merchant_id"])
+    required_tx = ["txn_id", "txn_ts", "user_id", "card_id", "amount", "merchant_id", "mcc"]
+    missing_tx = [c for c in required_tx if c not in tx_raw.columns]
+    if missing_tx:
+        raise ValueError(f"transactions_data.csv missing required columns: {missing_tx}")
 
     tx_df = tx_raw.copy()
     tx_df["txn_id"] = pd.to_numeric(tx_df["txn_id"], errors="coerce").astype("Int64")
@@ -154,14 +175,24 @@ def build_tables(src: Dict[str, pd.DataFrame]) -> Dict[str, pd.DataFrame]:
     tx_df["mcc"] = pd.to_numeric(tx_df["mcc"], errors="coerce").astype("Int64")
     tx_df["txn_ts"] = pd.to_datetime(tx_df["txn_ts"], errors="coerce", utc=True).dt.strftime("%Y-%m-%dT%H:%M:%SZ")
     tx_df["amount"] = pd.to_numeric(tx_df["amount"], errors="coerce")
-    tx_df["zip"] = normalize_zip(tx_df["zip"])
+    tx_df["zip"] = normalize_zip(tx_df["zip"]) if "zip" in tx_df.columns else None
     tx_df = tx_df.dropna(subset=["txn_id", "user_id", "card_id", "merchant_id", "txn_ts", "amount", "mcc"])
     tx_df = tx_df.drop_duplicates(subset=["txn_id"])
 
-    categories_df = categories_df[categories_df["mcc"].isin(tx_df["mcc"].unique())].copy()
+    mcc_df = mcc_df[mcc_df["mcc"].isin(tx_df["mcc"].unique())].copy()
+
+    merchants_df = merchants_raw.copy()
+    merchants_df["merchant_id"] = pd.to_numeric(merchants_df["merchant_id"], errors="coerce").astype("Int64")
+    merchants_df["mcc"] = pd.to_numeric(merchants_df["mcc"], errors="coerce").astype("Int64")
+    merchants_df["zip"] = normalize_zip(merchants_df["zip"])
+    merchants_df = merchants_df.dropna(subset=["merchant_id"]).drop_duplicates(subset=["merchant_id"])
     merchants_df = merchants_df[merchants_df["merchant_id"].isin(tx_df["merchant_id"].unique())].copy()
 
     fraud_df = fraud_raw.copy()
+    req_fraud = ["txn_id", "is_fraud"]
+    missing_fraud = [c for c in req_fraud if c not in fraud_df.columns]
+    if missing_fraud:
+        raise ValueError(f"fraud_labels.csv missing required columns: {missing_fraud}")
     fraud_df["txn_id"] = pd.to_numeric(fraud_df["txn_id"], errors="coerce").astype("Int64")
     fraud_df["is_fraud"] = pd.to_numeric(fraud_df["is_fraud"], errors="coerce").fillna(0).astype("Int64")
     fraud_df = fraud_df[fraud_df["txn_id"].isin(tx_df["txn_id"].unique())]
@@ -170,7 +201,7 @@ def build_tables(src: Dict[str, pd.DataFrame]) -> Dict[str, pd.DataFrame]:
     return {
         "users": users_df,
         "cards": cards_df,
-        "categories": categories_df,
+        "categories": mcc_df,
         "merchants": merchants_df,
         "transactions": tx_df,
         "fraud": fraud_df,
