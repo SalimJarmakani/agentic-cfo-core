@@ -28,12 +28,13 @@ from typing import Any, Dict, List, Optional
 
 import pandas as pd
 from neo4j import GraphDatabase
+from neo4j.exceptions import ClientError
 
 
 NEO4J_URI = os.getenv("NEO4J_URI", "bolt://localhost:7687")
 NEO4J_USER = os.getenv("NEO4J_USER", "neo4j")
 NEO4J_PASSWORD = os.getenv("NEO4J_PASSWORD", "neo4j12345")
-NEO4J_DATABASE = os.getenv("NEO4J_DATABASE", "caixabank")
+NEO4J_DATABASE = os.getenv("NEO4J_DATABASE", "neo4j")
 
 DATA_DIR = Path(os.getenv("DATA_DIR", "./data")).resolve()
 SAMPLE_USERS = int(os.getenv("SAMPLE_USERS", "0")) or None
@@ -330,8 +331,22 @@ def main() -> None:
     fraud_rows = df_to_records(tables["fraud"], ["txn_id", "is_fraud"])
 
     driver = GraphDatabase.driver(NEO4J_URI, auth=(NEO4J_USER, NEO4J_PASSWORD))
+    target_database = NEO4J_DATABASE
     try:
-        with driver.session(database=NEO4J_DATABASE) as session:
+        try:
+            with driver.session(database=target_database) as probe_session:
+                probe_session.run("RETURN 1").consume()
+        except ClientError as exc:
+            message = str(exc)
+            if "DatabaseNotFound" in message or "does not exist" in message:
+                print(
+                    f"WARN: Database '{target_database}' not found on server. Falling back to 'neo4j'."
+                )
+                target_database = "neo4j"
+            else:
+                raise
+
+        with driver.session(database=target_database) as session:
             ensure_constraints(session)
 
             migrate_nodes_if_empty(
@@ -470,3 +485,6 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
+
+
