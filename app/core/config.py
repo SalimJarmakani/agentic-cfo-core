@@ -21,6 +21,9 @@ class Settings(BaseSettings):
     default_recent_tx_limit: int = 25
     default_risky_merchants_limit: int = 20
 
+    # Comma-separated origins allowed for CORS, e.g. "http://localhost:5173,https://app.example.com"
+    cors_origins: str = "http://localhost:5173"
+
     model_config = SettingsConfigDict(env_file=".env", case_sensitive=False, extra="ignore")
 
 
