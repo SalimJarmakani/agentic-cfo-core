@@ -1,4 +1,5 @@
 from functools import lru_cache
+from pathlib import Path
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -21,10 +22,13 @@ class Settings(BaseSettings):
     default_recent_tx_limit: int = 25
     default_risky_merchants_limit: int = 20
 
-    model_config = SettingsConfigDict(env_file=".env", case_sensitive=False, extra="ignore")
+    model_config = SettingsConfigDict(
+        env_file=Path(__file__).resolve().parents[2] / ".env",
+        case_sensitive=False,
+        extra="ignore",
+    )
 
 
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:
     return Settings()
-
