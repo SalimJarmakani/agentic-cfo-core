@@ -49,6 +49,23 @@ class AgentQueryResponse(BaseModel):
     data: Dict[str, Any]
 
 
+class MidStageWorkflowRequest(BaseModel):
+    user_id: int = Field(ge=1)
+    question: str = Field(
+        default="Provide a financial assessment and next best actions.",
+        min_length=3,
+    )
+    top_k: int = Field(default=10, ge=1, le=100)
+
+
+class MidStageWorkflowResponse(BaseModel):
+    user_id: int
+    analysis: Dict[str, Any]
+    planning: List[PlanStep]
+    policy: Dict[str, Any]
+    explanation: str
+
+
 
 
 class SpendingCategoryItem(BaseModel):
