@@ -47,3 +47,49 @@ class AgentQueryResponse(BaseModel):
     answer: str
     plan: List[PlanStep]
     data: Dict[str, Any]
+
+
+
+
+class SpendingCategoryItem(BaseModel):
+    category: str
+    amount: float
+    percentage: float
+    transaction_count: int
+
+class UserSpendingGraphResponse(BaseModel):
+    user_id: int
+    total_spend: float
+    period: str = "all-time"
+    categories: List[SpendingCategoryItem]
+    recurring_payments: int
+    subscriptions: int
+
+
+class OptimizationSuggestionItem(BaseModel):
+    id: str
+    title: str
+    description: str
+    estimated_savings: float
+    category: str
+    priority: Literal["high", "medium", "low"]
+
+class UserOptimizationResponse(BaseModel):
+    user_id: int
+    suggestions: List[OptimizationSuggestionItem]
+    total_estimated_savings: float
+
+
+class PolicyRuleItem(BaseModel):
+    id: str
+    name: str
+    description: str
+    status: Literal["compliant", "warning", "violation"]
+    detail: str
+
+
+class UserPolicyComplianceResponse(BaseModel):
+    user_id: int
+    overall_status: Literal["compliant", "warning", "violation"]
+    score: int
+    rules: List[PolicyRuleItem]
