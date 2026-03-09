@@ -22,6 +22,11 @@ class Settings(BaseSettings):
     default_recent_tx_limit: int = 25
     default_risky_merchants_limit: int = 20
 
+    llm_base_url: str = "https://generativelanguage.googleapis.com/v1beta"
+    llm_api_key: str = ""
+    llm_model: str = "gemini-3-flash-preview"
+    llm_timeout_seconds: int = 30
+
     # Comma-separated origins allowed for CORS, e.g. "http://localhost:5173,https://app.example.com"
     cors_origins: str = "http://localhost:5173"
 

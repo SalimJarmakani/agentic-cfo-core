@@ -37,6 +37,13 @@ class AgentQueryRequest(BaseModel):
     top_k: int = Field(default=10, ge=1, le=100)
 
 
+class AnalysisAgentRequest(BaseModel):
+    user_id: int = Field(
+        ge=1,
+        description="User ID to analyze using transaction and graph data.",
+    )
+
+
 class PlanStep(BaseModel):
     datasource: Literal["postgres", "neo4j", "hybrid"]
     action: str
@@ -47,6 +54,13 @@ class AgentQueryResponse(BaseModel):
     answer: str
     plan: List[PlanStep]
     data: Dict[str, Any]
+
+
+class AnalysisAgentResponse(BaseModel):
+    user_id: int
+    input_tokens: int
+    analysis: str
+    supporting_data: Dict[str, Any]
 
 
 class MidStageWorkflowRequest(BaseModel):

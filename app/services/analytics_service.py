@@ -60,6 +60,23 @@ class AnalyticsService:
             )
             return [dict(r) for r in cur.fetchall()]
 
+    def get_user_recent_transactions(self, user_id: int, limit: int | None = None) -> List[Dict[str, Any]]:
+        settings = get_settings()
+        safe_limit = limit or settings.default_recent_tx_limit
+        with get_postgres_cursor() as cur:
+            cur.execute(
+                """
+                SELECT
+                    txn_id, user_id, card_id, merchant_id, txn_ts, amount, mcc
+                FROM transactions
+                WHERE user_id = %s
+                ORDER BY txn_ts DESC
+                LIMIT %s
+                """,
+                (user_id, safe_limit),
+            )
+            return [dict(r) for r in cur.fetchall()]
+
     def get_user_spending_summary(self, user_id: int) -> Dict[str, Any]:
         with get_postgres_cursor() as cur:
             cur.execute(
