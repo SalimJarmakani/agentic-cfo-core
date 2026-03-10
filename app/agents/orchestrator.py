@@ -88,7 +88,7 @@ class AgentOrchestrator:
             prompt=prompt,
             system_prompt=system_prompt,
             temperature=0.2,
-            max_tokens=500,
+            max_tokens=1500,
         )
 
         return AnalysisAgentResponse(
