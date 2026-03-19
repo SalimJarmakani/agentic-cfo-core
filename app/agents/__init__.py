@@ -1,2 +1,1 @@
-"""Agent planning and orchestration."""
-
+"""Agent planning, workflow agents, and orchestration."""

@@ -7,7 +7,7 @@ from app.core.config import get_settings
 
 
 @contextmanager
-def get_postgres_cursor():
+def get_postgres_connection():
     settings = get_settings()
     conn = psycopg2.connect(
         host=settings.pghost,
@@ -17,8 +17,17 @@ def get_postgres_cursor():
         password=settings.pgpassword,
     )
     try:
-        with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            yield cur
+        yield conn
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
     finally:
         conn.close()
 
+
+@contextmanager
+def get_postgres_cursor():
+    with get_postgres_connection() as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            yield cur

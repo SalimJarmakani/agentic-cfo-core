@@ -1,10 +1,15 @@
 import json
+import logging
 from typing import Any, Dict
 
 from app.agents.planner import QueryPlanner
+from app.agents.workflow_agents import AnalysisAgent, PlanningAgent, PolicyAgent
 from app.models.schemas import AnalysisAgentResponse, AgentQueryResponse, MidStageWorkflowResponse
 from app.services.analytics_service import AnalyticsService
 from app.services.llm_service import LLMService
+from app.services.workflow_service import WorkflowService, WorkflowServiceError
+
+logger = logging.getLogger(__name__)
 
 
 class AgentOrchestrator:
@@ -12,6 +17,10 @@ class AgentOrchestrator:
         self.planner = QueryPlanner()
         self.service = AnalyticsService()
         self.llm_service = LLMService()
+        self.workflow_service = WorkflowService()
+        self.analysis_agent = AnalysisAgent(self.llm_service)
+        self.planning_agent = PlanningAgent(self.llm_service)
+        self.policy_agent = PolicyAgent()
 
     def run(self, question: str, top_k: int) -> AgentQueryResponse:
         plan = self.planner.build_plan(question)
@@ -29,8 +38,159 @@ class AgentOrchestrator:
         answer = self._build_answer(question=question, data=data)
         return AgentQueryResponse(answer=answer, plan=plan, data=data)
 
+    def start_agent_workflow(self, user_id: int, question: str) -> Dict[str, Any]:
+        logger.info("Starting agent workflow for user_id=%s", user_id)
+        workflow = self.workflow_service.create_workflow_run(user_id=user_id, question=question)
+        workflow_run_id = int(workflow["workflow_run_id"])
+        logger.info("Workflow run %s created; starting analysis step", workflow_run_id)
+
+        try:
+            analysis_input = self._build_analysis_input_payload(user_id=user_id, question=question)
+            self.workflow_service.start_step(
+                workflow_run_id=workflow_run_id,
+                step_name="analysis",
+                input_payload=analysis_input,
+            )
+            analysis_result = self._run_analysis_step(
+                user_id=user_id,
+                question=question,
+                input_payload=analysis_input,
+            )
+            self.workflow_service.complete_step(
+                workflow_run_id=workflow_run_id,
+                step_name="analysis",
+                output_payload=analysis_result["output_payload"],
+            )
+            self.workflow_service.update_workflow_status(
+                workflow_run_id=workflow_run_id,
+                status="waiting_for_user",
+                current_stage="analysis",
+            )
+            logger.info("Workflow run %s moved to waiting_for_user after analysis", workflow_run_id)
+        except Exception as exc:
+            logger.exception("Workflow run %s failed during analysis", workflow_run_id)
+            self.workflow_service.fail_step(
+                workflow_run_id=workflow_run_id,
+                step_name="analysis",
+                error_message=str(exc),
+            )
+            self.workflow_service.update_workflow_status(
+                workflow_run_id=workflow_run_id,
+                status="failed",
+                current_stage="failed",
+            )
+            raise
+
+        return self.workflow_service.get_workflow(workflow_run_id)
+
+    def list_agent_workflows(self, user_id: int, limit: int = 20) -> Dict[str, Any]:
+        return {
+            "user_id": user_id,
+            "items": self.workflow_service.list_workflows(user_id=user_id, limit=limit),
+        }
+
+    def continue_agent_workflow(self, workflow_run_id: int) -> Dict[str, Any]:
+        logger.info("Continuing workflow run %s", workflow_run_id)
+        workflow = self.workflow_service.get_workflow(workflow_run_id)
+        analysis_step = self.workflow_service.get_step(workflow_run_id=workflow_run_id, step_name="analysis")
+        planning_step = self.workflow_service.get_step(workflow_run_id=workflow_run_id, step_name="planning")
+        policy_step = self.workflow_service.get_step(workflow_run_id=workflow_run_id, step_name="policy")
+
+        if policy_step["status"] == "completed":
+            return workflow
+
+        if analysis_step["status"] != "completed" or not analysis_step.get("output_payload"):
+            raise WorkflowServiceError("Analysis must complete before planning can run.")
+
+        planning_output = planning_step.get("output_payload")
+        if planning_step["status"] != "completed" or not planning_output:
+            planning_input = self._build_planning_input(
+                user_id=int(workflow["user_id"]),
+                question=workflow["question"],
+                analysis_output=analysis_step["output_payload"],
+            )
+            try:
+                self.workflow_service.update_workflow_status(
+                    workflow_run_id=workflow_run_id,
+                    status="running",
+                    current_stage="planning",
+                )
+                self.workflow_service.start_step(
+                    workflow_run_id=workflow_run_id,
+                    step_name="planning",
+                    input_payload=planning_input,
+                )
+                planning_output = self._run_planning_step(planning_input=planning_input)
+                self.workflow_service.complete_step(
+                    workflow_run_id=workflow_run_id,
+                    step_name="planning",
+                    output_payload=planning_output,
+                )
+                logger.info("Workflow run %s completed planning step", workflow_run_id)
+            except Exception as exc:
+                logger.exception("Workflow run %s failed during planning", workflow_run_id)
+                self.workflow_service.fail_step(
+                    workflow_run_id=workflow_run_id,
+                    step_name="planning",
+                    error_message=str(exc),
+                )
+                self.workflow_service.update_workflow_status(
+                    workflow_run_id=workflow_run_id,
+                    status="failed",
+                    current_stage="failed",
+                )
+                raise
+
+        policy_input = self._build_policy_input_payload(
+            user_id=int(workflow["user_id"]),
+            question=workflow["question"],
+            analysis_output=analysis_step["output_payload"],
+            planning_output=planning_output,
+        )
+
+        try:
+            self.workflow_service.update_workflow_status(
+                workflow_run_id=workflow_run_id,
+                status="running",
+                current_stage="policy",
+            )
+            self.workflow_service.start_step(
+                workflow_run_id=workflow_run_id,
+                step_name="policy",
+                input_payload=policy_input,
+            )
+            policy_output = self._run_policy_step(policy_input=policy_input)
+            self.workflow_service.complete_step(
+                workflow_run_id=workflow_run_id,
+                step_name="policy",
+                output_payload=policy_output,
+            )
+            self.workflow_service.update_workflow_status(
+                workflow_run_id=workflow_run_id,
+                status="completed",
+                current_stage="done",
+            )
+            logger.info("Workflow run %s completed policy step and workflow", workflow_run_id)
+        except Exception as exc:
+            logger.exception("Workflow run %s failed during policy", workflow_run_id)
+            self.workflow_service.fail_step(
+                workflow_run_id=workflow_run_id,
+                step_name="policy",
+                error_message=str(exc),
+            )
+            self.workflow_service.update_workflow_status(
+                workflow_run_id=workflow_run_id,
+                status="failed",
+                current_stage="failed",
+            )
+            raise
+
+        return self.workflow_service.get_workflow(workflow_run_id)
+
+    def get_agent_workflow(self, workflow_run_id: int) -> Dict[str, Any]:
+        return self.workflow_service.get_workflow(workflow_run_id)
+
     def run_mid_stage_workflow(self, user_id: int, question: str, top_k: int) -> MidStageWorkflowResponse:
-        # Analysis Agent
         analysis = {
             "recent_transactions": self.service.get_recent_transactions(limit=top_k),
             "risky_merchants": self.service.get_risky_merchants(limit=min(top_k, 20)),
@@ -38,13 +198,8 @@ class AgentOrchestrator:
             "optimization": self.service.get_user_optimization(user_id=user_id),
         }
 
-        # Planning Agent
         planning = self.planner.build_plan(question)
-
-        # Policy Agent
         policy = self.service.get_user_policy_compliance(user_id=user_id)
-
-        # Explanation Agent
         explanation = self._build_mid_stage_explanation(
             question=question,
             planning=planning,
@@ -60,43 +215,150 @@ class AgentOrchestrator:
             explanation=explanation,
         )
 
-    def run_analysis_agent(
+    def run_analysis_agent(self, user_id: int) -> AnalysisAgentResponse:
+        result = self._run_analysis_step(
+            user_id=user_id,
+            question="Provide a financial assessment and next actions.",
+        )
+        return AnalysisAgentResponse(
+            user_id=user_id,
+            input_tokens=int(result["output_payload"]["input_tokens"]),
+            analysis=str(result["output_payload"]["analysis"]),
+            supporting_data=result["input_payload"],
+        )
+
+    def _run_analysis_step(
         self,
         user_id: int,
-    ) -> AnalysisAgentResponse:
-        system_prompt = (
-            "You are a financial analysis agent for Agent CFO. "
-            "Use only the provided user transaction and graph data. "
-            "Keep the analysis simple, specific, and actionable."
-        )
+        question: str,
+        input_payload: Dict[str, Any] | None = None,
+    ) -> Dict[str, Any]:
+        input_payload = input_payload or self._build_analysis_input_payload(user_id=user_id, question=question)
+        output_payload = self.analysis_agent.run(input_payload=input_payload)
+        return {
+            "input_payload": input_payload,
+            "output_payload": output_payload,
+        }
+
+    def _run_planning_step(self, planning_input: Dict[str, Any]) -> Dict[str, Any]:
+        return self.planning_agent.run(planning_input=planning_input)
+
+    def _run_policy_step(self, policy_input: Dict[str, Any]) -> Dict[str, Any]:
+        return self.policy_agent.run(policy_input=policy_input)
+
+    def _build_analysis_input_payload(self, user_id: int, question: str) -> Dict[str, Any]:
         supporting_data: Dict[str, Any] = {
             "user_spending_summary": self.service.get_user_spending_summary(user_id=user_id),
             "user_spending_graph": self.service.get_user_spending_graph(user_id=user_id),
             "optimization": self.service.get_user_optimization(user_id=user_id),
             "policy": self.service.get_user_policy_compliance(user_id=user_id),
-            "recent_transactions": self.service.get_user_recent_transactions(user_id=user_id, limit=10),
+            "recent_transactions": self.service.get_user_recent_transactions(user_id=user_id, limit=5),
         }
-        prompt = self._build_analysis_prompt(supporting_data=supporting_data, user_id=user_id)
-        input_tokens = self.llm_service.count_generate_input_tokens(
-            prompt=prompt,
-            system_prompt=system_prompt,
+        summary = supporting_data["user_spending_summary"]
+        graph = supporting_data["user_spending_graph"]
+        optimization = supporting_data["optimization"]
+        policy = supporting_data["policy"]
+
+        payload = {
+            "user_id": user_id,
+            "question": question,
+            "summary_metrics": {
+                "total_spend": summary.get("total_spend"),
+                "txn_count": summary.get("txn_count"),
+                "avg_ticket": summary.get("avg_ticket"),
+                "first_txn_ts": summary.get("first_txn_ts"),
+                "last_txn_ts": summary.get("last_txn_ts"),
+            },
+            "top_categories": (graph.get("categories") or [])[:3],
+            "optimization_suggestions": [
+                {
+                    "title": item.get("title"),
+                    "priority": item.get("priority"),
+                    "estimated_savings": item.get("estimated_savings"),
+                }
+                for item in (optimization.get("suggestions") or [])[:3]
+            ],
+            "policy_issues": [
+                {
+                    "name": rule.get("name"),
+                    "status": rule.get("status"),
+                    "detail": rule.get("detail"),
+                }
+                for rule in (policy.get("rules") or [])[:3]
+                if rule.get("status") != "compliant"
+            ],
+            "policy_status": policy.get("overall_status"),
+            "recent_transactions": [
+                {
+                    "txn_ts": tx.get("txn_ts"),
+                    "amount": tx.get("amount"),
+                    "merchant_id": tx.get("merchant_id"),
+                    "mcc": tx.get("mcc"),
+                }
+                for tx in (supporting_data.get("recent_transactions") or [])[:3]
+            ],
+        }
+        return self._normalize_json_value(payload)
+
+    def _build_planning_input(
+        self,
+        user_id: int,
+        question: str,
+        analysis_output: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        user_policy = self.service.get_user_policy_compliance(user_id=user_id)
+        return self._normalize_json_value(
+            {
+                "question": question,
+                "summary": analysis_output.get("summary", ""),
+                "risks": (analysis_output.get("risks") or [])[:3],
+                "opportunities": (analysis_output.get("opportunities") or [])[:3],
+                "next_actions": (analysis_output.get("next_actions") or [])[:3],
+                "user_policy_status": user_policy.get("overall_status"),
+                "user_policy_score": user_policy.get("score"),
+                "user_policy_findings": [
+                    {
+                        "name": rule.get("name"),
+                        "status": rule.get("status"),
+                        "detail": rule.get("detail"),
+                    }
+                    for rule in (user_policy.get("rules") or [])[:4]
+                    if rule.get("status") != "compliant"
+                ],
+            }
         )
 
-        print(f"[analysis-agent] user_id={user_id} input_tokens={input_tokens}")
-
-        analysis = self.llm_service.generate(
-            prompt=prompt,
-            system_prompt=system_prompt,
-            temperature=0.2,
-            max_tokens=1500,
-        )
-
-        return AnalysisAgentResponse(
-            user_id=user_id,
-            input_tokens=input_tokens,
-            analysis=analysis,
-            supporting_data=supporting_data,
-        )
+    def _build_policy_input_payload(
+        self,
+        user_id: int,
+        question: str,
+        analysis_output: Dict[str, Any],
+        planning_output: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        user_policy = self.service.get_user_policy_compliance(user_id=user_id)
+        payload = {
+            "user_id": user_id,
+            "question": question,
+            "analysis_summary": analysis_output.get("summary", ""),
+            "planning": {
+                "goal": planning_output.get("goal", ""),
+                "actions": planning_output.get("actions") or [],
+                "checkpoints": planning_output.get("checkpoints") or [],
+            },
+            "user_policy": {
+                "overall_status": user_policy.get("overall_status"),
+                "score": user_policy.get("score"),
+                "rules": [
+                    {
+                        "name": rule.get("name"),
+                        "status": rule.get("status"),
+                        "detail": rule.get("detail"),
+                    }
+                    for rule in (user_policy.get("rules") or [])[:4]
+                ],
+            },
+        }
+        return self._normalize_json_value(payload)
 
     @staticmethod
     def _build_answer(question: str, data: Dict[str, Any]) -> str:
@@ -124,73 +386,5 @@ class AgentOrchestrator:
         )
 
     @staticmethod
-    def _build_analysis_prompt(supporting_data: Dict[str, Any], user_id: int) -> str:
-        summary = supporting_data.get("user_spending_summary", {})
-        graph = supporting_data.get("user_spending_graph", {})
-        optimization = supporting_data.get("optimization", {})
-        policy = supporting_data.get("policy", {})
-        recent_transactions = supporting_data.get("recent_transactions", [])
-
-        top_categories = (graph.get("categories") or [])[:5]
-        top_suggestions = (optimization.get("suggestions") or [])[:5]
-        policy_rules = [
-            rule
-            for rule in (policy.get("rules") or [])
-            if rule.get("status") != "compliant"
-        ][:5]
-        recent_tx_lines = [
-            (
-                f"- {tx.get('txn_ts')}: amount={tx.get('amount')}, "
-                f"merchant_id={tx.get('merchant_id')}, mcc={tx.get('mcc')}"
-            )
-            for tx in recent_transactions[:5]
-        ]
-        category_lines = [
-            (
-                f"- {cat.get('category')}: amount={cat.get('amount')}, "
-                f"share={cat.get('percentage')}%, txns={cat.get('transaction_count')}"
-            )
-            for cat in top_categories
-        ]
-        suggestion_lines = [
-            (
-                f"- {item.get('title')}: priority={item.get('priority')}, "
-                f"estimated_savings={item.get('estimated_savings')}"
-            )
-            for item in top_suggestions
-        ]
-        policy_lines = [
-            f"- {rule.get('name')}: status={rule.get('status')}, detail={rule.get('detail')}"
-            for rule in policy_rules
-        ]
-
-        return (
-            f"Analyze user {user_id} based on the summary below.\n\n"
-            "User summary:\n"
-            f"- total_spend={summary.get('total_spend')}\n"
-            f"- txn_count={summary.get('txn_count')}\n"
-            f"- avg_ticket={summary.get('avg_ticket')}\n"
-            f"- first_txn_ts={summary.get('first_txn_ts')}\n"
-            f"- last_txn_ts={summary.get('last_txn_ts')}\n\n"
-            "Graph summary:\n"
-            f"- graph_total_spend={graph.get('total_spend')}\n"
-            f"- recurring_payments={graph.get('recurring_payments')}\n"
-            f"- subscriptions={graph.get('subscriptions')}\n"
-            "Top categories:\n"
-            f"{chr(10).join(category_lines) if category_lines else '- none'}\n\n"
-            "Recent transactions:\n"
-            f"{chr(10).join(recent_tx_lines) if recent_tx_lines else '- none'}\n\n"
-            "Optimization suggestions:\n"
-            f"{chr(10).join(suggestion_lines) if suggestion_lines else '- none'}\n\n"
-            "Policy summary:\n"
-            f"- overall_status={policy.get('overall_status')}\n"
-            f"- score={policy.get('score')}\n"
-            "Policy issues:\n"
-            f"{chr(10).join(policy_lines) if policy_lines else '- none'}\n\n"
-            "Write a short analysis with these sections:\n"
-            "1. Summary\n"
-            "2. Risks\n"
-            "3. Opportunities\n"
-            "4. Next actions\n"
-            "Keep each section brief and grounded in the data."
-        )
+    def _normalize_json_value(value: Dict[str, Any]) -> Dict[str, Any]:
+        return json.loads(json.dumps(value, default=str))

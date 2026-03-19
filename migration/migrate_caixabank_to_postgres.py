@@ -116,6 +116,71 @@ CREATE TABLE IF NOT EXISTS fraud_labels (
   txn_id BIGINT PRIMARY KEY REFERENCES transactions(txn_id) ON DELETE CASCADE,
   is_fraud SMALLINT NOT NULL CHECK (is_fraud IN (0,1))
 );
+
+CREATE TABLE IF NOT EXISTS workflow_runs (
+  workflow_run_id BIGSERIAL PRIMARY KEY,
+  user_id BIGINT NOT NULL REFERENCES users(user_id),
+  question TEXT NOT NULL,
+  status TEXT NOT NULL CHECK (status IN ('running', 'waiting_for_user', 'completed', 'failed')),
+  current_stage TEXT NOT NULL CHECK (current_stage IN ('analysis', 'planning', 'policy', 'done', 'failed')),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_workflow_runs_user_created ON workflow_runs(user_id, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS workflow_steps (
+  workflow_step_id BIGSERIAL PRIMARY KEY,
+  workflow_run_id BIGINT NOT NULL REFERENCES workflow_runs(workflow_run_id) ON DELETE CASCADE,
+  step_name TEXT NOT NULL CHECK (step_name IN ('analysis', 'planning', 'policy')),
+  status TEXT NOT NULL CHECK (status IN ('pending', 'running', 'completed', 'failed')),
+  input_payload JSONB,
+  output_payload JSONB,
+  error_message TEXT,
+  started_at TIMESTAMPTZ,
+  completed_at TIMESTAMPTZ,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  UNIQUE (workflow_run_id, step_name)
+);
+CREATE INDEX IF NOT EXISTS idx_workflow_steps_run ON workflow_steps(workflow_run_id, step_name);
+
+DO $$
+DECLARE
+  runs_constraint TEXT;
+  steps_constraint TEXT;
+BEGIN
+  SELECT con.conname
+  INTO runs_constraint
+  FROM pg_constraint con
+  JOIN pg_class rel ON rel.oid = con.conrelid
+  WHERE rel.relname = 'workflow_runs'
+    AND con.contype = 'c'
+    AND pg_get_constraintdef(con.oid) LIKE '%current_stage%';
+
+  IF runs_constraint IS NOT NULL THEN
+    EXECUTE format('ALTER TABLE workflow_runs DROP CONSTRAINT %I', runs_constraint);
+  END IF;
+
+  ALTER TABLE workflow_runs
+  ADD CONSTRAINT workflow_runs_current_stage_check
+  CHECK (current_stage IN ('analysis', 'planning', 'policy', 'done', 'failed'));
+
+  SELECT con.conname
+  INTO steps_constraint
+  FROM pg_constraint con
+  JOIN pg_class rel ON rel.oid = con.conrelid
+  WHERE rel.relname = 'workflow_steps'
+    AND con.contype = 'c'
+    AND pg_get_constraintdef(con.oid) LIKE '%step_name%';
+
+  IF steps_constraint IS NOT NULL THEN
+    EXECUTE format('ALTER TABLE workflow_steps DROP CONSTRAINT %I', steps_constraint);
+  END IF;
+
+  ALTER TABLE workflow_steps
+  ADD CONSTRAINT workflow_steps_step_name_check
+  CHECK (step_name IN ('analysis', 'planning', 'policy'));
+END $$;
 """
 
 

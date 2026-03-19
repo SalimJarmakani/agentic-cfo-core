@@ -44,6 +44,14 @@ class AnalysisAgentRequest(BaseModel):
     )
 
 
+class AgentWorkflowStartRequest(BaseModel):
+    user_id: int = Field(ge=1)
+    question: str = Field(
+        default="Provide a financial assessment and a simple action plan.",
+        min_length=3,
+    )
+
+
 class PlanStep(BaseModel):
     datasource: Literal["postgres", "neo4j", "hybrid"]
     action: str
@@ -61,6 +69,46 @@ class AnalysisAgentResponse(BaseModel):
     input_tokens: int
     analysis: str
     supporting_data: Dict[str, Any]
+
+
+class WorkflowStepResponse(BaseModel):
+    workflow_step_id: int
+    workflow_run_id: int
+    step_name: Literal["analysis", "planning", "policy"]
+    status: Literal["pending", "running", "completed", "failed"]
+    input_payload: Optional[Dict[str, Any]] = None
+    output_payload: Optional[Dict[str, Any]] = None
+    error_message: Optional[str] = None
+    started_at: Optional[str] = None
+    completed_at: Optional[str] = None
+    created_at: Optional[str] = None
+    updated_at: Optional[str] = None
+
+
+class AgentWorkflowResponse(BaseModel):
+    workflow_run_id: int
+    user_id: int
+    question: str
+    status: Literal["running", "waiting_for_user", "completed", "failed"]
+    current_stage: Literal["analysis", "planning", "policy", "done", "failed"]
+    created_at: str
+    updated_at: str
+    steps: List[WorkflowStepResponse]
+
+
+class AgentWorkflowSummaryResponse(BaseModel):
+    workflow_run_id: int
+    user_id: int
+    question: str
+    status: Literal["running", "waiting_for_user", "completed", "failed"]
+    current_stage: Literal["analysis", "planning", "policy", "done", "failed"]
+    created_at: str
+    updated_at: str
+
+
+class AgentWorkflowListResponse(BaseModel):
+    user_id: int
+    items: List[AgentWorkflowSummaryResponse]
 
 
 class MidStageWorkflowRequest(BaseModel):
