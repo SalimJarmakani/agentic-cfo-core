@@ -51,9 +51,9 @@ class LLMService:
         }
 
         response_data = self._post_json("/api/chat", payload)
-        text = (response_data.get("message") or {}).get("content", "").strip()
+        text = self._extract_text_content(response_data)
         if not text:
-            raise LLMServiceError("LLM response did not include text content.")
+            raise LLMServiceError(self._build_empty_content_error(response_data))
         return text
 
     def count_input_tokens(
@@ -244,3 +244,28 @@ class LLMService:
         if role in {"system", "assistant", "user"}:
             return role
         return "user"
+
+    @staticmethod
+    def _extract_text_content(response_data: dict) -> str:
+        message = response_data.get("message") or {}
+        candidates = [
+            message.get("content"),
+            response_data.get("response"),
+        ]
+        for candidate in candidates:
+            if isinstance(candidate, str) and candidate.strip():
+                return candidate.strip()
+        return ""
+
+    @staticmethod
+    def _build_empty_content_error(response_data: dict) -> str:
+        message = response_data.get("message") or {}
+        message_keys = sorted(message.keys()) if isinstance(message, dict) else []
+        return (
+            "LLM response did not include text content. "
+            f"done={response_data.get('done')} "
+            f"done_reason={response_data.get('done_reason')} "
+            f"prompt_eval_count={response_data.get('prompt_eval_count')} "
+            f"eval_count={response_data.get('eval_count')} "
+            f"message_keys={message_keys}"
+        )

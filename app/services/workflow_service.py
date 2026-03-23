@@ -43,9 +43,11 @@ class WorkflowService:
                     VALUES
                         (%s, 'analysis', 'pending'),
                         (%s, 'planning', 'pending'),
-                        (%s, 'policy', 'pending')
+                        (%s, 'policy', 'pending'),
+                        (%s, 'explanation', 'pending')
                     """,
                     (
+                        workflow["workflow_run_id"],
                         workflow["workflow_run_id"],
                         workflow["workflow_run_id"],
                         workflow["workflow_run_id"],
@@ -87,7 +89,7 @@ class WorkflowService:
 
                             ALTER TABLE workflow_runs
                             ADD CONSTRAINT workflow_runs_current_stage_check
-                            CHECK (current_stage IN ('analysis', 'planning', 'policy', 'done', 'failed'));
+                            CHECK (current_stage IN ('analysis', 'planning', 'policy', 'explanation', 'done', 'failed'));
                         EXCEPTION
                             WHEN duplicate_object THEN NULL;
                         END $$;
@@ -113,7 +115,7 @@ class WorkflowService:
 
                             ALTER TABLE workflow_steps
                             ADD CONSTRAINT workflow_steps_step_name_check
-                            CHECK (step_name IN ('analysis', 'planning', 'policy'));
+                            CHECK (step_name IN ('analysis', 'planning', 'policy', 'explanation'));
                         EXCEPTION
                             WHEN duplicate_object THEN NULL;
                         END $$;
@@ -131,10 +133,11 @@ class WorkflowService:
                     VALUES
                         (%s, 'analysis', 'pending'),
                         (%s, 'planning', 'pending'),
-                        (%s, 'policy', 'pending')
+                        (%s, 'policy', 'pending'),
+                        (%s, 'explanation', 'pending')
                     ON CONFLICT (workflow_run_id, step_name) DO NOTHING
                     """,
-                    (workflow_run_id, workflow_run_id, workflow_run_id),
+                    (workflow_run_id, workflow_run_id, workflow_run_id, workflow_run_id),
                 )
 
     def list_workflows(self, user_id: int, limit: int = 20) -> list[Dict[str, Any]]:
@@ -208,6 +211,7 @@ class WorkflowService:
                             WHEN 'analysis' THEN 1
                             WHEN 'planning' THEN 2
                             WHEN 'policy' THEN 3
+                            WHEN 'explanation' THEN 4
                             ELSE 99
                         END
                     """,

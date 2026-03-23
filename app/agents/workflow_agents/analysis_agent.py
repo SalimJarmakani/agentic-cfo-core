@@ -8,6 +8,9 @@ class AnalysisAgent(LLMJsonAgent):
     SYSTEM_PROMPT = (
         "You are a financial analysis agent for Agent CFO. "
         "Use only the provided data. "
+        "Preserve the time horizon of each metric. "
+        "Treat all-time totals, observed monthly averages, and policy ratios as separate concepts. "
+        "Never compare all-time spend directly to monthly income unless the input already provides a normalized monthly metric. "
         "Return valid JSON only."
     )
 
@@ -34,6 +37,13 @@ class AnalysisAgent(LLMJsonAgent):
         return (
             "Analyze the user data below and respond with JSON only.\n\n"
             f"{json.dumps(input_payload, indent=2, default=str)}\n\n"
+            "Analysis rules:\n"
+            "- Use time_context and summary_metrics exactly as provided.\n"
+            "- If the history spans multiple months or years, refer to total_spend as historical or all-time spend.\n"
+            "- Use observed_monthly_avg_spend for any monthly framing.\n"
+            "- Do not restate a spending-to-income or debt-to-income ratio unless it appears in policy_snapshot.\n"
+            "- Do not invent merchants, categories, savings, or causes that are not in the payload.\n"
+            "- Keep the summary grounded in concrete metrics and mention the observed period when large totals are historical.\n\n"
             "Return this schema:\n"
             "{\n"
             '  "summary": "short paragraph",\n'

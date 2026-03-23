@@ -3,7 +3,7 @@ import logging
 from typing import Any, Dict
 
 from app.agents.planner import QueryPlanner
-from app.agents.workflow_agents import AnalysisAgent, PlanningAgent, PolicyAgent
+from app.agents.workflow_agents import AnalysisAgent, ExplanationAgent, PlanningAgent, PolicyAgent
 from app.models.schemas import AnalysisAgentResponse, AgentQueryResponse, MidStageWorkflowResponse
 from app.services.analytics_service import AnalyticsService
 from app.services.llm_service import LLMService
@@ -20,7 +20,8 @@ class AgentOrchestrator:
         self.workflow_service = WorkflowService()
         self.analysis_agent = AnalysisAgent(self.llm_service)
         self.planning_agent = PlanningAgent(self.llm_service)
-        self.policy_agent = PolicyAgent()
+        self.policy_agent = PolicyAgent(self.llm_service)
+        self.explanation_agent = ExplanationAgent(self.llm_service)
 
     def run(self, question: str, top_k: int) -> AgentQueryResponse:
         plan = self.planner.build_plan(question)
@@ -95,8 +96,9 @@ class AgentOrchestrator:
         analysis_step = self.workflow_service.get_step(workflow_run_id=workflow_run_id, step_name="analysis")
         planning_step = self.workflow_service.get_step(workflow_run_id=workflow_run_id, step_name="planning")
         policy_step = self.workflow_service.get_step(workflow_run_id=workflow_run_id, step_name="policy")
+        explanation_step = self.workflow_service.get_step(workflow_run_id=workflow_run_id, step_name="explanation")
 
-        if policy_step["status"] == "completed":
+        if explanation_step["status"] == "completed":
             return workflow
 
         if analysis_step["status"] != "completed" or not analysis_step.get("output_payload"):
@@ -127,6 +129,13 @@ class AgentOrchestrator:
                     output_payload=planning_output,
                 )
                 logger.info("Workflow run %s completed planning step", workflow_run_id)
+                self.workflow_service.update_workflow_status(
+                    workflow_run_id=workflow_run_id,
+                    status="waiting_for_user",
+                    current_stage="planning",
+                )
+                logger.info("Workflow run %s moved to waiting_for_user after planning", workflow_run_id)
+                return self.workflow_service.get_workflow(workflow_run_id)
             except Exception as exc:
                 logger.exception("Workflow run %s failed during planning", workflow_run_id)
                 self.workflow_service.fail_step(
@@ -141,41 +150,89 @@ class AgentOrchestrator:
                 )
                 raise
 
-        policy_input = self._build_policy_input_payload(
-            user_id=int(workflow["user_id"]),
+        policy_output = policy_step.get("output_payload")
+        if policy_step["status"] != "completed" or not policy_output:
+            policy_input = self._build_policy_input_payload(
+                user_id=int(workflow["user_id"]),
+                question=workflow["question"],
+                analysis_output=analysis_step["output_payload"],
+                planning_output=planning_output,
+            )
+
+            try:
+                self.workflow_service.update_workflow_status(
+                    workflow_run_id=workflow_run_id,
+                    status="running",
+                    current_stage="policy",
+                )
+                self.workflow_service.start_step(
+                    workflow_run_id=workflow_run_id,
+                    step_name="policy",
+                    input_payload=policy_input,
+                )
+                policy_output = self._run_policy_step(policy_input=policy_input)
+                self.workflow_service.complete_step(
+                    workflow_run_id=workflow_run_id,
+                    step_name="policy",
+                    output_payload=policy_output,
+                )
+                logger.info("Workflow run %s completed policy step", workflow_run_id)
+                self.workflow_service.update_workflow_status(
+                    workflow_run_id=workflow_run_id,
+                    status="waiting_for_user",
+                    current_stage="policy",
+                )
+                logger.info("Workflow run %s moved to waiting_for_user after policy", workflow_run_id)
+                return self.workflow_service.get_workflow(workflow_run_id)
+            except Exception as exc:
+                logger.exception("Workflow run %s failed during policy", workflow_run_id)
+                self.workflow_service.fail_step(
+                    workflow_run_id=workflow_run_id,
+                    step_name="policy",
+                    error_message=str(exc),
+                )
+                self.workflow_service.update_workflow_status(
+                    workflow_run_id=workflow_run_id,
+                    status="failed",
+                    current_stage="failed",
+                )
+                raise
+
+        explanation_input = self._build_explanation_input_payload(
             question=workflow["question"],
             analysis_output=analysis_step["output_payload"],
             planning_output=planning_output,
+            policy_output=policy_output,
         )
 
         try:
             self.workflow_service.update_workflow_status(
                 workflow_run_id=workflow_run_id,
                 status="running",
-                current_stage="policy",
+                current_stage="explanation",
             )
             self.workflow_service.start_step(
                 workflow_run_id=workflow_run_id,
-                step_name="policy",
-                input_payload=policy_input,
+                step_name="explanation",
+                input_payload=explanation_input,
             )
-            policy_output = self._run_policy_step(policy_input=policy_input)
+            explanation_output = self._run_explanation_step(explanation_input=explanation_input)
             self.workflow_service.complete_step(
                 workflow_run_id=workflow_run_id,
-                step_name="policy",
-                output_payload=policy_output,
+                step_name="explanation",
+                output_payload=explanation_output,
             )
             self.workflow_service.update_workflow_status(
                 workflow_run_id=workflow_run_id,
                 status="completed",
                 current_stage="done",
             )
-            logger.info("Workflow run %s completed policy step and workflow", workflow_run_id)
+            logger.info("Workflow run %s completed explanation step and workflow", workflow_run_id)
         except Exception as exc:
-            logger.exception("Workflow run %s failed during policy", workflow_run_id)
+            logger.exception("Workflow run %s failed during explanation", workflow_run_id)
             self.workflow_service.fail_step(
                 workflow_run_id=workflow_run_id,
-                step_name="policy",
+                step_name="explanation",
                 error_message=str(exc),
             )
             self.workflow_service.update_workflow_status(
@@ -246,48 +303,79 @@ class AgentOrchestrator:
     def _run_policy_step(self, policy_input: Dict[str, Any]) -> Dict[str, Any]:
         return self.policy_agent.run(policy_input=policy_input)
 
+    def _run_explanation_step(self, explanation_input: Dict[str, Any]) -> Dict[str, Any]:
+        return self.explanation_agent.run(explanation_input=explanation_input)
+
     def _build_analysis_input_payload(self, user_id: int, question: str) -> Dict[str, Any]:
         supporting_data: Dict[str, Any] = {
             "user_spending_summary": self.service.get_user_spending_summary(user_id=user_id),
             "user_spending_graph": self.service.get_user_spending_graph(user_id=user_id),
             "optimization": self.service.get_user_optimization(user_id=user_id),
             "policy": self.service.get_user_policy_compliance(user_id=user_id),
-            "recent_transactions": self.service.get_user_recent_transactions(user_id=user_id, limit=5),
+            "recent_transactions": self.service.get_user_recent_transactions(user_id=user_id, limit=100),
         }
         summary = supporting_data["user_spending_summary"]
         graph = supporting_data["user_spending_graph"]
         optimization = supporting_data["optimization"]
         policy = supporting_data["policy"]
+        policy_metrics = policy.get("metrics") or {}
+        recent_transactions = supporting_data.get("recent_transactions") or []
 
         payload = {
             "user_id": user_id,
             "question": question,
+            "time_context": {
+                "analysis_period": summary.get("analysis_period", "all-time"),
+                "first_txn_ts": summary.get("first_txn_ts"),
+                "last_txn_ts": summary.get("last_txn_ts"),
+                "observed_span_months": summary.get("observed_span_months"),
+                "active_months": summary.get("active_months"),
+                "normalization_note": (
+                    "Treat total_spend as all-time historical spend. Use observed_monthly_avg_spend for monthly framing. "
+                    "Do not compare all-time totals directly against monthly income."
+                ),
+            },
             "summary_metrics": {
                 "total_spend": summary.get("total_spend"),
                 "txn_count": summary.get("txn_count"),
                 "avg_ticket": summary.get("avg_ticket"),
-                "first_txn_ts": summary.get("first_txn_ts"),
-                "last_txn_ts": summary.get("last_txn_ts"),
+                "observed_monthly_avg_spend": summary.get("observed_monthly_avg_spend"),
+                "observed_monthly_avg_txn_count": summary.get("observed_monthly_avg_txn_count"),
             },
-            "top_categories": (graph.get("categories") or [])[:3],
+            "financial_profile": {
+                "yearly_income": policy_metrics.get("yearly_income"),
+                "monthly_income": policy_metrics.get("monthly_income"),
+                "total_debt": policy_metrics.get("total_debt"),
+                "credit_score": policy_metrics.get("credit_score"),
+            },
+            "policy_snapshot": {
+                "overall_status": policy.get("overall_status"),
+                "score": policy.get("score"),
+                "metrics": {
+                    "spend_to_income_ratio_pct": policy_metrics.get("spend_to_income_ratio_pct"),
+                    "debt_to_income_ratio_pct": policy_metrics.get("debt_to_income_ratio_pct"),
+                    "fraud_exposure_pct": policy_metrics.get("fraud_exposure_pct"),
+                    "top_category_concentration_pct": policy_metrics.get("top_category_concentration_pct"),
+                },
+                "rules": [
+                    {
+                        "name": rule.get("name"),
+                        "status": rule.get("status"),
+                        "detail": rule.get("detail"),
+                    }
+                    for rule in (policy.get("rules") or [])[:4]
+                ],
+            },
+            "top_categories": (graph.get("categories") or [])[:5],
             "optimization_suggestions": [
                 {
                     "title": item.get("title"),
                     "priority": item.get("priority"),
                     "estimated_savings": item.get("estimated_savings"),
+                    "description": item.get("description"),
                 }
-                for item in (optimization.get("suggestions") or [])[:3]
+                for item in (optimization.get("suggestions") or [])[:4]
             ],
-            "policy_issues": [
-                {
-                    "name": rule.get("name"),
-                    "status": rule.get("status"),
-                    "detail": rule.get("detail"),
-                }
-                for rule in (policy.get("rules") or [])[:3]
-                if rule.get("status") != "compliant"
-            ],
-            "policy_status": policy.get("overall_status"),
             "recent_transactions": [
                 {
                     "txn_ts": tx.get("txn_ts"),
@@ -295,7 +383,7 @@ class AgentOrchestrator:
                     "merchant_id": tx.get("merchant_id"),
                     "mcc": tx.get("mcc"),
                 }
-                for tx in (supporting_data.get("recent_transactions") or [])[:3]
+                for tx in recent_transactions[:12]
             ],
         }
         return self._normalize_json_value(payload)
@@ -356,6 +444,38 @@ class AgentOrchestrator:
                     }
                     for rule in (user_policy.get("rules") or [])[:4]
                 ],
+            },
+        }
+        return self._normalize_json_value(payload)
+
+    def _build_explanation_input_payload(
+        self,
+        question: str,
+        analysis_output: Dict[str, Any],
+        planning_output: Dict[str, Any],
+        policy_output: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        payload = {
+            "question": question,
+            "analysis": {
+                "summary": analysis_output.get("summary", ""),
+                "risks": (analysis_output.get("risks") or [])[:3],
+                "opportunities": (analysis_output.get("opportunities") or [])[:3],
+                "next_actions": (analysis_output.get("next_actions") or [])[:3],
+            },
+            "planning": {
+                "goal": planning_output.get("goal", ""),
+                "actions": (planning_output.get("actions") or [])[:3],
+                "checkpoints": (planning_output.get("checkpoints") or [])[:3],
+            },
+            "policy": {
+                "approved": policy_output.get("approved"),
+                "requires_human_review": policy_output.get("requires_human_review"),
+                "summary": policy_output.get("summary", ""),
+                "user_policy_status": policy_output.get("user_policy_status", ""),
+                "user_policy_findings": (policy_output.get("user_policy_findings") or [])[:3],
+                "guardrails": (policy_output.get("guardrails") or [])[:3],
+                "blocked_actions": (policy_output.get("blocked_actions") or [])[:3],
             },
         }
         return self._normalize_json_value(payload)

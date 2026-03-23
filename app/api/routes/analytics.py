@@ -5,6 +5,7 @@ from app.models.schemas import (
     RecentTransactionsResponse,
     RiskyMerchantsResponse,
     UserSpendingSummaryResponse,
+    UsersSpendingOverviewResponse,
     UserSpendingGraphResponse,
     UserOptimizationResponse,
     UserPolicyComplianceResponse,
@@ -34,6 +35,12 @@ def recent_transactions(limit: int = Query(default=25, ge=1, le=500)) -> RecentT
 def user_spending_summary(user_id: int) -> UserSpendingSummaryResponse:
     payload = service.get_user_spending_summary(user_id=user_id)
     return UserSpendingSummaryResponse(**payload)
+
+
+@router.get("/analytics/users/spending-overview", response_model=UsersSpendingOverviewResponse)
+def users_spending_overview() -> UsersSpendingOverviewResponse:
+    rows = service.get_users_spending_overview()
+    return UsersSpendingOverviewResponse(items=rows)
 
 
 @router.get("/graph/merchants/risky", response_model=RiskyMerchantsResponse)

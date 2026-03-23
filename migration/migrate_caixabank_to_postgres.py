@@ -122,7 +122,7 @@ CREATE TABLE IF NOT EXISTS workflow_runs (
   user_id BIGINT NOT NULL REFERENCES users(user_id),
   question TEXT NOT NULL,
   status TEXT NOT NULL CHECK (status IN ('running', 'waiting_for_user', 'completed', 'failed')),
-  current_stage TEXT NOT NULL CHECK (current_stage IN ('analysis', 'planning', 'policy', 'done', 'failed')),
+  current_stage TEXT NOT NULL CHECK (current_stage IN ('analysis', 'planning', 'policy', 'explanation', 'done', 'failed')),
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
@@ -131,7 +131,7 @@ CREATE INDEX IF NOT EXISTS idx_workflow_runs_user_created ON workflow_runs(user_
 CREATE TABLE IF NOT EXISTS workflow_steps (
   workflow_step_id BIGSERIAL PRIMARY KEY,
   workflow_run_id BIGINT NOT NULL REFERENCES workflow_runs(workflow_run_id) ON DELETE CASCADE,
-  step_name TEXT NOT NULL CHECK (step_name IN ('analysis', 'planning', 'policy')),
+  step_name TEXT NOT NULL CHECK (step_name IN ('analysis', 'planning', 'policy', 'explanation')),
   status TEXT NOT NULL CHECK (status IN ('pending', 'running', 'completed', 'failed')),
   input_payload JSONB,
   output_payload JSONB,
@@ -143,6 +143,44 @@ CREATE TABLE IF NOT EXISTS workflow_steps (
   UNIQUE (workflow_run_id, step_name)
 );
 CREATE INDEX IF NOT EXISTS idx_workflow_steps_run ON workflow_steps(workflow_run_id, step_name);
+
+CREATE TABLE IF NOT EXISTS api_request_logs (
+  request_log_id BIGSERIAL PRIMARY KEY,
+  method TEXT NOT NULL,
+  path TEXT NOT NULL,
+  status_code INTEGER NOT NULL,
+  duration_ms DOUBLE PRECISION NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_api_request_logs_created ON api_request_logs(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_api_request_logs_path ON api_request_logs(path);
+
+CREATE TABLE IF NOT EXISTS validated_query_evaluations (
+  evaluation_id BIGSERIAL PRIMARY KEY,
+  question TEXT NOT NULL,
+  expected_answer TEXT NOT NULL,
+  actual_answer TEXT NOT NULL,
+  is_correct BOOLEAN,
+  evaluator TEXT,
+  notes TEXT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_validated_query_evaluations_created
+  ON validated_query_evaluations(created_at DESC);
+
+CREATE TABLE IF NOT EXISTS recommendation_feedback (
+  feedback_id BIGSERIAL PRIMARY KEY,
+  workflow_run_id BIGINT NOT NULL REFERENCES workflow_runs(workflow_run_id) ON DELETE CASCADE,
+  recommendation_stage TEXT NOT NULL CHECK (recommendation_stage IN ('analysis', 'planning', 'policy', 'explanation')),
+  usefulness_rating INTEGER NOT NULL CHECK (usefulness_rating BETWEEN 1 AND 5),
+  clarity_rating INTEGER CHECK (clarity_rating BETWEEN 1 AND 5),
+  adopted BOOLEAN,
+  evaluator TEXT,
+  comments TEXT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_recommendation_feedback_workflow
+  ON recommendation_feedback(workflow_run_id, created_at DESC);
 
 DO $$
 DECLARE
@@ -163,7 +201,7 @@ BEGIN
 
   ALTER TABLE workflow_runs
   ADD CONSTRAINT workflow_runs_current_stage_check
-  CHECK (current_stage IN ('analysis', 'planning', 'policy', 'done', 'failed'));
+  CHECK (current_stage IN ('analysis', 'planning', 'policy', 'explanation', 'done', 'failed'));
 
   SELECT con.conname
   INTO steps_constraint
@@ -179,7 +217,7 @@ BEGIN
 
   ALTER TABLE workflow_steps
   ADD CONSTRAINT workflow_steps_step_name_check
-  CHECK (step_name IN ('analysis', 'planning', 'policy'));
+  CHECK (step_name IN ('analysis', 'planning', 'policy', 'explanation'));
 END $$;
 """
 

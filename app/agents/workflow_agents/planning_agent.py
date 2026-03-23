@@ -8,6 +8,7 @@ class PlanningAgent(LLMJsonAgent):
     SYSTEM_PROMPT = (
         "You are a financial planning agent for Agent CFO. "
         "Create a short, actionable plan based only on the analysis findings and policy constraints. "
+        "Do not introduce unsupported ratios, savings, or time claims. "
         "Return valid JSON only."
     )
 
@@ -35,6 +36,11 @@ class PlanningAgent(LLMJsonAgent):
             "Create a short actionable plan from the analysis findings and policy context below "
             "and respond with JSON only.\n\n"
             f"{json.dumps(planning_input, indent=2, default=str)}\n\n"
+            "Planning rules:\n"
+            "- Base the plan on the supplied summary, risks, opportunities, next actions, and user policy findings.\n"
+            "- If user_policy_status is warning or violation, prioritize remediation before discretionary optimization.\n"
+            "- Keep actions concrete and recommendation-only.\n"
+            "- Do not invent numerical savings, deadlines, or metrics that are not in the input.\n\n"
             "Return this schema:\n"
             "{\n"
             '  "goal": "single sentence goal",\n'
